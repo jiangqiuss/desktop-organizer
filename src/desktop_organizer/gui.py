@@ -162,7 +162,10 @@ class DesktopOrganizer:
         frame_opt.pack(fill="x", padx=10, pady=5)
 
         self.clean_var = tk.BooleanVar()
-        ttk.Checkbutton(frame_opt, text="同时清理垃圾文件（.tmp, .bak, .old 等）", variable=self.clean_var).pack(anchor="w")
+        ttk.Checkbutton(frame_opt, text="同时清理垃圾文件（.tmp, .cache 等）", variable=self.clean_var).pack(anchor="w")
+
+        self.recursive_var = tk.BooleanVar()
+        ttk.Checkbutton(frame_opt, text="扫描子文件夹，重新分类放错位置的文件", variable=self.recursive_var).pack(anchor="w")
 
         self.dry_run_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(frame_opt, text="先预览再执行（推荐）", variable=self.dry_run_var).pack(anchor="w")
@@ -213,19 +216,43 @@ class DesktopOrganizer:
 
         self.clear_log()
         self.files = []
+        recursive = self.recursive_var.get()
 
         # 扫描文件
-        self.log(f"扫描目录: {source}")
-        for item in source.iterdir():
-            if item.is_file():
-                self.files.append({
-                    "path": item,
-                    "name": item.name,
-                    "ext": item.suffix,
-                    "size": item.stat().st_size,
-                    "modified": datetime.fromtimestamp(item.stat().st_mtime),
-                    "type": get_file_type(item.suffix, item.stem),
-                })
+        mode_text = "递归扫描" if recursive else "扫描"
+        self.log(f"{mode_text}目录: {source}")
+
+        if recursive:
+            # 递归扫描，跳过已分类的文件夹
+            all_categories = set(FILE_TYPES.keys()) | set(SHORTCUT_CATEGORIES.keys()) | {"其他"}
+            for item in source.rglob("*"):
+                if item.is_file():
+                    rel = item.relative_to(source)
+                    parts = rel.parts
+                    # 跳过已在分类文件夹内的文件
+                    if len(parts) > 1 and parts[0] in all_categories:
+                        continue
+                    self.files.append({
+                        "path": item,
+                        "name": item.name,
+                        "ext": item.suffix,
+                        "size": item.stat().st_size,
+                        "modified": datetime.fromtimestamp(item.stat().st_mtime),
+                        "type": get_file_type(item.suffix, item.stem),
+                        "in_subdir": item.parent != source,
+                    })
+        else:
+            for item in source.iterdir():
+                if item.is_file():
+                    self.files.append({
+                        "path": item,
+                        "name": item.name,
+                        "ext": item.suffix,
+                        "size": item.stat().st_size,
+                        "modified": datetime.fromtimestamp(item.stat().st_mtime),
+                        "type": get_file_type(item.suffix, item.stem),
+                        "in_subdir": False,
+                    })
 
         self.log(f"找到 {len(self.files)} 个文件\n")
 
@@ -251,7 +278,8 @@ class DesktopOrganizer:
                 target = f["type"]
             else:
                 target = f["modified"].strftime("%Y-%m")
-            self.log(f"  {f['name']} → {target}/")
+            subdir_tag = " [子目录]" if f.get("in_subdir") else ""
+            self.log(f"  {f['name']}{subdir_tag} → {target}/")
 
         self.log(f"\n共 {len(non_junk)} 个文件将被移动")
         self.exec_btn.configure(state="normal")
@@ -268,34 +296,64 @@ class DesktopOrganizer:
         moved = 0
         cleaned = 0
         mode = self.mode_var.get()
+        recursive = self.recursive_var.get()
+
+        # 收集要处理的文件
+        files_to_process = []
+        all_categories = set(FILE_TYPES.keys()) | set(SHORTCUT_CATEGORIES.keys()) | {"其他"}
+
+        if recursive:
+            for item in source.rglob("*"):
+                if item.is_file():
+                    rel = item.relative_to(source)
+                    parts = rel.parts
+                    if len(parts) > 1 and parts[0] in all_categories:
+                        continue
+                    files_to_process.append(item)
+        else:
+            for item in source.iterdir():
+                if item.is_file():
+                    files_to_process.append(item)
 
         # 清理垃圾
         if self.clean_var.get():
-            for item in source.iterdir():
-                if item.is_file():
-                    if item.suffix.lower() in JUNK_EXTENSIONS or item.name.lower() in JUNK_NAMES:
-                        item.unlink()
-                        self.log(f"  已删除: {item.name}")
-                        cleaned += 1
+            for item in files_to_process[:]:
+                if item.suffix.lower() in JUNK_EXTENSIONS or item.name.lower() in JUNK_NAMES:
+                    item.unlink()
+                    self.log(f"  已删除: {item.name}")
+                    cleaned += 1
+                    files_to_process.remove(item)
 
         # 整理文件
-        for item in source.iterdir():
-            if item.is_file():
-                if mode == "type":
-                    target = get_file_type(item.suffix, item.stem)
-                else:
-                    target = datetime.fromtimestamp(item.stat().st_mtime).strftime("%Y-%m")
+        for item in files_to_process:
+            if mode == "type":
+                target = get_file_type(item.suffix, item.stem)
+            else:
+                target = datetime.fromtimestamp(item.stat().st_mtime).strftime("%Y-%m")
 
-                dest_dir = source / target
-                dest_dir.mkdir(exist_ok=True)
-                dest = resolve_dest(dest_dir / item.name)
-                shutil.move(str(item), str(dest))
-                self.log(f"  {item.name} → {target}/")
-                moved += 1
+            dest_dir = source / target
+            dest_dir.mkdir(exist_ok=True)
+            dest = resolve_dest(dest_dir / item.name)
+            shutil.move(str(item), str(dest))
+            self.log(f"  {item.name} → {target}/")
+            moved += 1
+
+        # 清理空文件夹
+        empty_removed = 0
+        if recursive:
+            for d in sorted(source.rglob("*"), reverse=True):
+                if d.is_dir() and not any(d.iterdir()):
+                    try:
+                        d.rmdir()
+                        empty_removed += 1
+                    except:
+                        pass
 
         self.log(f"\n完成！移动了 {moved} 个文件")
         if cleaned:
             self.log(f"清理了 {cleaned} 个垃圾文件")
+        if empty_removed:
+            self.log(f"清理了 {empty_removed} 个空文件夹")
 
         messagebox.showinfo("完成", f"整理完成！\n移动了 {moved} 个文件")
         self.exec_btn.configure(state="disabled")
