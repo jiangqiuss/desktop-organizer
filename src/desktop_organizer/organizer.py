@@ -132,20 +132,53 @@ def resolve_dest(dest: Path) -> Path:
     return dest
 
 
-def scan_directory(path: Path) -> list[dict]:
+def scan_directory(path: Path, recursive: bool = False) -> list[dict]:
     """扫描目录，返回文件信息列表"""
     files = []
-    for item in path.iterdir():
-        if item.is_file():
-            files.append({
-                "path": item,
-                "name": item.name,
-                "ext": item.suffix,
-                "size": item.stat().st_size,
-                "modified": datetime.fromtimestamp(item.stat().st_mtime),
-                "type": get_file_type(item.suffix, item.stem),
-            })
+    if recursive:
+        for item in path.rglob("*"):
+            if item.is_file() and not _is_inside_category_dir(item, path):
+                files.append({
+                    "path": item,
+                    "name": item.name,
+                    "ext": item.suffix,
+                    "size": item.stat().st_size,
+                    "modified": datetime.fromtimestamp(item.stat().st_mtime),
+                    "type": get_file_type(item.suffix, item.stem),
+                    "in_subdir": item.parent != path,
+                })
+    else:
+        for item in path.iterdir():
+            if item.is_file():
+                files.append({
+                    "path": item,
+                    "name": item.name,
+                    "ext": item.suffix,
+                    "size": item.stat().st_size,
+                    "modified": datetime.fromtimestamp(item.stat().st_mtime),
+                    "type": get_file_type(item.suffix, item.stem),
+                    "in_subdir": False,
+                })
     return files
+
+
+def _is_inside_category_dir(file_path: Path, root: Path) -> bool:
+    """检查文件是否已经在分类文件夹内（避免重复整理）"""
+    # 获取所有已知的分类文件夹名
+    all_categories = set()
+    for type_name in FILE_TYPES:
+        all_categories.add(type_name)
+    all_categories.add("其他")
+    for cat in SHORTCUT_CATEGORIES:
+        all_categories.add(cat)
+    all_categories.add("其他")
+
+    # 检查文件的父目录是否是分类文件夹
+    rel = file_path.relative_to(root)
+    parts = rel.parts
+    if len(parts) > 1 and parts[0] in all_categories:
+        return True
+    return False
 
 
 def organize_by_type(files: list[dict], target_dir: Path) -> int:
@@ -184,3 +217,13 @@ def clean_junk(path: Path) -> list[str]:
                 cleaned.append(item.name)
                 item.unlink()
     return cleaned
+
+
+def clean_empty_dirs(path: Path) -> int:
+    """清理空文件夹（从深到浅）"""
+    removed = 0
+    for d in sorted(path.rglob("*"), reverse=True):
+        if d.is_dir() and not any(d.iterdir()):
+            d.rmdir()
+            removed += 1
+    return removed
